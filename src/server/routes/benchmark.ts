@@ -7,15 +7,24 @@ import { auditDb } from '../persistence/database.ts';
 
 export const benchmarkRouter = Router();
 
-benchmarkRouter.post('/api/benchmark/run', (req, res) => {
-  const isLive = req.body.isLiveApi === true;
-  const result = runSyntheticBenchmark(isLive);
-  auditDb.saveBenchmarkRun(result);
+benchmarkRouter.post('/api/benchmark/run', async (req, res) => {
+  try {
+    const isLive = req.body?.isLiveApi === true;
+    const result = await runSyntheticBenchmark(isLive);
+    auditDb.saveBenchmarkRun(result);
 
-  res.json({
-    success: true,
-    benchmarkRun: result,
-  });
+    res.json({
+      success: true,
+      benchmarkRun: result,
+    });
+  } catch (err) {
+    console.error('[Benchmark Route Error]', err);
+    res.status(500).json({
+      success: false,
+      errorCode: 'BENCHMARK_EXECUTION_FAILED',
+      message: err instanceof Error ? err.message : 'Benchmark execution failed.',
+    });
+  }
 });
 
 benchmarkRouter.get('/api/benchmark/results', (req, res) => {
@@ -41,6 +50,9 @@ benchmarkRouter.get('/api/benchmark/export', (req, res) => {
 
   const csv = benchmarkRunToCSV(run);
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="pakka_note_benchmark_${run.runId}.csv"`);
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="pakka_note_benchmark_${run.runId}.csv"`
+  );
   res.send(csv);
 });

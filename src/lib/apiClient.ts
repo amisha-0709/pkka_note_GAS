@@ -101,10 +101,13 @@ export interface CaptureResponse {
   message?: string;
 }
 
+import { getAudioFileExtension } from './audioUtils.ts';
+
 export async function captureAudio(params: CaptureAudioParams): Promise<CaptureResponse> {
   const formData = new FormData();
   if (params.audioBlob) {
-    formData.append('audio', params.audioBlob, 'capture.wav');
+    const ext = getAudioFileExtension(params.audioBlob.type || 'audio/wav');
+    formData.append('audio', params.audioBlob, `capture.${ext}`);
   }
   formData.append('field', params.field);
   formData.append('language', params.language);

@@ -35,8 +35,8 @@ async function startServer() {
   app.use(recordsRouter);
   app.use(benchmarkRouter);
   app.use(testConnectionRouter);
-  
-  // Guarantee that any unhandled /api/* route returns JSON, never Vite HTML fallback
+
+  // Guarantee that any unhandled /api/* route returns 404 JSON, never Vite HTML fallback
   app.all('/api/*', (req, res) => {
     res.status(404).json({
       success: false,
@@ -45,14 +45,26 @@ async function startServer() {
     });
   });
 
-  // Global error handler for API routes
-  app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  // Global error handler for API routes - strict non-2xx status codes and safe JSON
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (req.path.startsWith('/api')) {
       console.error('[API Server Error]', err);
-      return res.status(200).json({
+      const status =
+        typeof err?.status === 'number' && err.status >= 400 && err.status < 600
+          ? err.status
+          : 500;
+
+      // Sanitize messages: never expose raw stack traces, secrets, or internal details
+      const rawMsg =
+        typeof err?.message === 'string'
+          ? err.message
+          : 'Internal server error occurred.';
+      const safeMsg = rawMsg.replace(/[A-Za-z0-9_-]{20,}/g, '[REDACTED]').slice(0, 200);
+
+      return res.status(status).json({
         success: false,
-        errorCode: 'INTERNAL_SERVER_ERROR',
-        message: err.message || 'Internal server error occurred.',
+        errorCode: err?.code || (status === 500 ? 'INTERNAL_SERVER_ERROR' : 'BAD_REQUEST'),
+        message: status === 500 ? 'An internal server error occurred.' : safeMsg,
       });
     }
     next(err);

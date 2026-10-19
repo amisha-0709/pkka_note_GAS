@@ -12,13 +12,68 @@ export interface RecorderState {
 }
 
 /**
+ * Checks supported audio MIME types for MediaRecorder in the current browser
+ */
+export function getSupportedRecorderMimeType(): string {
+  if (typeof MediaRecorder === 'undefined') {
+    return 'audio/webm';
+  }
+  const candidateTypes = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/ogg;codecs=opus',
+    'audio/ogg',
+    'audio/mp4',
+    'audio/aac',
+  ];
+
+  for (const type of candidateTypes) {
+    if (MediaRecorder.isTypeSupported(type)) {
+      return type;
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Derives appropriate file extension from a Blob or MIME string
+ * NEVER returns 'wav' unless the MIME is actually WAV!
+ */
+export function getAudioFileExtension(mimeType: string): string {
+  const clean = mimeType.toLowerCase();
+  if (clean.includes('wav') || clean.includes('wave')) return 'wav';
+  if (clean.includes('webm')) return 'webm';
+  if (clean.includes('ogg')) return 'ogg';
+  if (clean.includes('mp4') || clean.includes('m4a')) return 'm4a';
+  if (clean.includes('mpeg') || clean.includes('mp3')) return 'mp3';
+  return 'bin';
+}
+
+/**
+ * Verifies if a Blob has a valid RIFF WAVE header
+ */
+export async function isWavBlob(blob: Blob): Promise<boolean> {
+  if (blob.size < 44) return false;
+  try {
+    const slice = await blob.slice(0, 12).arrayBuffer();
+    const view = new DataView(slice);
+    const riff = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+    const wave = String.fromCharCode(view.getUint8(8), view.getUint8(9), view.getUint8(10), view.getUint8(11));
+    return riff === 'RIFF' && wave === 'WAVE';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Encodes an AudioBuffer into standard mono 16-bit PCM 16,000 Hz WAV Blob
  */
 export function encodeWAV(audioBuffer: AudioBuffer): Blob {
   const targetSampleRate = 16000;
   const numChannels = 1;
   const sourceChannelData = audioBuffer.getChannelData(0);
-  
+
   // Resample to 16,000 Hz if needed
   const sourceSampleRate = audioBuffer.sampleRate;
   const sampleRateRatio = sourceSampleRate / targetSampleRate;

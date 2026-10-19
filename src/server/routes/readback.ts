@@ -33,6 +33,7 @@ readbackRouter.post('/api/readback', async (req, res) => {
     if (sessionId) {
       auditDb.insertEvent(
         createStateEvent(sessionId, 'valid_candidate', 'failed', attempt, captureId, undefined, {
+          candidate,
           error: ttsResult.errorMessage,
           errorCode: ttsResult.errorCode,
           spokenText,
@@ -40,7 +41,8 @@ readbackRouter.post('/api/readback', async (req, res) => {
       );
     }
 
-    return res.status(200).json({
+    const statusCode = ttsResult.errorCode === 'GNANI_API_KEY_NOT_CONFIGURED' ? 503 : 502;
+    return res.status(statusCode).json({
       success: false,
       spokenText,
       errorCode: ttsResult.errorCode,
@@ -52,6 +54,7 @@ readbackRouter.post('/api/readback', async (req, res) => {
   if (sessionId) {
     auditDb.insertEvent(
       createStateEvent(sessionId, 'valid_candidate', 'read_back', attempt, captureId, undefined, {
+        candidate,
         spokenText,
         model: ttsResult.model,
         voice: ttsResult.voice,
@@ -60,7 +63,7 @@ readbackRouter.post('/api/readback', async (req, res) => {
     );
   }
 
-  res.json({
+  res.status(200).json({
     success: true,
     spokenText,
     audioBase64: ttsResult.audioBase64,

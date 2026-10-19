@@ -18,24 +18,94 @@ correctionRouter.post('/api/correction', (req, res) => {
     attempt = 1,
   } = req.body;
 
-  if (!sessionId || !previousCandidate || !correctionInput) {
+  // 1. Validate required presence
+  if (!sessionId || !previousCandidate || typeof correctionInput !== 'string') {
     return res.status(400).json({
       success: false,
       errorCode: 'MISSING_PARAMETERS',
-      message: 'sessionId, previousCandidate, and correctionInput are required.',
+      message: 'sessionId, previousCandidate, and correctionInput are strictly required.',
     });
   }
 
-  const fieldType = (field || 'mobile_number') as FieldType;
+  if (!captureId) {
+    return res.status(400).json({
+      success: false,
+      errorCode: 'MISSING_CAPTURE_ID',
+      message: 'captureId is required to associate correction with the active capture.',
+    });
+  }
 
+  // 2. Verify capture exists and belongs to session
+  const capture = auditDb.getCapture(captureId);
+  if (!capture) {
+    return res.status(404).json({
+      success: false,
+      errorCode: 'NONEXISTENT_CAPTURE',
+      message: `Capture record "${captureId}" does not exist.`,
+    });
+  }
+
+  if (capture.sessionId !== sessionId) {
+    return res.status(400).json({
+      success: false,
+      errorCode: 'CAPTURE_SESSION_MISMATCH',
+      message: `Capture "${captureId}" does not belong to session "${sessionId}".`,
+    });
+  }
+
+  const fieldType = (field || capture.field || 'mobile_number') as FieldType;
+
+  // 3. Validate partial-correction parameters
+  if (mode === 'replace_last_n') {
+    const n = Number(lastN);
+    if (!Number.isInteger(n) || n < 1 || n > previousCandidate.length) {
+      return res.status(400).json({
+        success: false,
+        errorCode: 'INVALID_PARTIAL_CORRECTION',
+        message: `lastN must be an integer between 1 and ${previousCandidate.length} (received: ${lastN}).`,
+      });
+    }
+    if (!correctionInput.trim()) {
+      return res.status(400).json({
+        success: false,
+        errorCode: 'INVALID_PARTIAL_CORRECTION',
+        message: 'Correction replacement input cannot be empty for replace_last_n mode.',
+      });
+    }
+  } else if (mode === 'replace_at_index') {
+    const idx = Number(startIndex);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= previousCandidate.length) {
+      return res.status(400).json({
+        success: false,
+        errorCode: 'INVALID_PARTIAL_CORRECTION',
+        message: `startIndex must be an integer between 0 and ${previousCandidate.length - 1} (received: ${startIndex}).`,
+      });
+    }
+  } else if (mode !== 'full') {
+    return res.status(400).json({
+      success: false,
+      errorCode: 'INVALID_CORRECTION_MODE',
+      message: `Unknown correction mode "${mode}". Supported: full, replace_last_n, replace_at_index.`,
+    });
+  }
+
+  // 4. Apply correction and revalidate candidate using FieldEngine
   const result = applyCorrection(previousCandidate, fieldType, {
     mode,
     correctionInput,
-    lastN,
-    startIndex,
+    lastN: lastN !== undefined ? Number(lastN) : undefined,
+    startIndex: startIndex !== undefined ? Number(startIndex) : undefined,
   });
 
-  // Audit state: CORRECTED
+  // 5. Update active candidate on the capture in audit database
+  auditDb.updateCaptureCandidate(
+    captureId,
+    result.mergedValue,
+    result.success,
+    result.validation.validationMessage
+  );
+
+  // 6. Record audit state event: Rejected -> Corrected
   auditDb.insertEvent(
     createStateEvent(sessionId, 'rejected', 'corrected', attempt, captureId, undefined, {
       mode,
@@ -46,7 +116,8 @@ correctionRouter.post('/api/correction', (req, res) => {
     })
   );
 
-  // If valid, transition to valid_candidate for read-back
+  // 7. Transition session state: Corrected -> valid_candidate (or invalid_candidate)
+  // Crucial: State is now valid_candidate, requiring another read-back before confirmation!
   if (result.success) {
     auditDb.insertEvent(
       createStateEvent(sessionId, 'corrected', 'valid_candidate', attempt, captureId, undefined, {
@@ -55,10 +126,16 @@ correctionRouter.post('/api/correction', (req, res) => {
     );
     auditDb.updateSessionStatus(sessionId, 'valid_candidate');
   } else {
+    auditDb.insertEvent(
+      createStateEvent(sessionId, 'corrected', 'invalid_candidate', attempt, captureId, undefined, {
+        candidate: result.mergedValue,
+        validationError: result.validation.validationMessage,
+      })
+    );
     auditDb.updateSessionStatus(sessionId, 'invalid_candidate');
   }
 
-  res.json({
+  res.status(result.success ? 200 : 422).json({
     success: result.success,
     previousCandidate,
     proposedCandidate: result.proposedCandidate,

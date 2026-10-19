@@ -1,7 +1,8 @@
 /**
  * Pakka Note - Gnani Prisma STT Integration Service
  * Communicates with Gnani Prisma Speech-to-Text API v3.
- * Strictly adheres to server-side secrets discipline and transparent error reporting.
+ * Strictly adheres to server-side secrets discipline, response validation,
+ * and transparent error reporting without faking success on empty transcripts.
  */
 
 import { getServerConfig } from '../config/environment.ts';
@@ -28,12 +29,53 @@ export interface PrismaSTTResponse {
   rawResponseSummary?: string;
 }
 
+const SUPPORTED_LANGUAGES: LanguageCode[] = ['en-IN', 'hi-IN'];
+const SUPPORTED_MODES: STTFormatMode[] = ['transcribe', 'verbatim'];
+
 export async function callGnaniPrismaSTT(req: PrismaSTTRequest): Promise<PrismaSTTResponse> {
   const config = getServerConfig();
   const startTime = Date.now();
   const mode = req.format || 'transcribe';
   const modelName = 'Gnani Prisma v3';
 
+  // 1. Validate inputs
+  if (!req.audioBuffer || req.audioBuffer.length === 0) {
+    return {
+      success: false,
+      transcript: '',
+      latencyMs: Date.now() - startTime,
+      model: modelName,
+      mode,
+      errorCode: 'EMPTY_AUDIO_INPUT',
+      errorMessage: 'Audio input buffer is empty. A valid non-empty audio recording is required.',
+    };
+  }
+
+  if (!SUPPORTED_LANGUAGES.includes(req.languageCode)) {
+    return {
+      success: false,
+      transcript: '',
+      latencyMs: Date.now() - startTime,
+      model: modelName,
+      mode,
+      errorCode: 'UNSUPPORTED_LANGUAGE',
+      errorMessage: `Language code "${req.languageCode}" is not supported. Supported languages: ${SUPPORTED_LANGUAGES.join(', ')}.`,
+    };
+  }
+
+  if (!SUPPORTED_MODES.includes(mode)) {
+    return {
+      success: false,
+      transcript: '',
+      latencyMs: Date.now() - startTime,
+      model: modelName,
+      mode,
+      errorCode: 'UNSUPPORTED_MODE',
+      errorMessage: `Format mode "${mode}" is not supported. Supported modes: ${SUPPORTED_MODES.join(', ')}.`,
+    };
+  }
+
+  // 2. Validate configuration
   if (!config.isGnaniConfigured) {
     return {
       success: false,
@@ -47,22 +89,23 @@ export async function callGnaniPrismaSTT(req: PrismaSTTRequest): Promise<PrismaS
     };
   }
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000); // 15-second bounded timeout
+
   try {
-    const boundary = `----PakkaNoteBoundary${Date.now()}`;
     const filename = req.originalFilename || 'audio.wav';
-    
+
     // Construct standard multipart/form-data payload with Node Buffer/Blob
     const formData = new FormData();
-    const audioBlob = new Blob([new Uint8Array(req.audioBuffer)], { type: req.mimeType || 'audio/wav' });
-    
+    const audioBlob = new Blob([new Uint8Array(req.audioBuffer)], {
+      type: req.mimeType || 'audio/wav',
+    });
+
     formData.append('audio_file', audioBlob, filename);
     formData.append('language_code', req.languageCode);
     formData.append('preferred_language', req.preferredLanguage || req.languageCode);
     formData.append('format', mode);
     formData.append('itn_native_numerals', String(req.itnNativeNumerals ?? true));
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second bounded timeout
 
     const response = await fetch(config.sttEndpoint, {
       method: 'POST',
@@ -73,7 +116,6 @@ export async function callGnaniPrismaSTT(req: PrismaSTTRequest): Promise<PrismaS
       signal: controller.signal,
     });
 
-    clearTimeout(timeoutId);
     const latencyMs = Date.now() - startTime;
 
     if (!response.ok) {
@@ -84,7 +126,7 @@ export async function callGnaniPrismaSTT(req: PrismaSTTRequest): Promise<PrismaS
         errBody = response.statusText;
       }
 
-      // Safe error categorization
+      // Safe error categorization without exposing secrets
       let errorCode = `HTTP_${response.status}`;
       if (response.status === 401 || response.status === 403) {
         errorCode = 'GNANI_AUTH_FAILED';
@@ -94,6 +136,13 @@ export async function callGnaniPrismaSTT(req: PrismaSTTRequest): Promise<PrismaS
         errorCode = 'GNANI_UPSTREAM_ERROR';
       }
 
+      // Sanitize any accidental secret leakage in provider error response
+      let sanitizedBody = errBody;
+      if (config.gnaniApiKey) {
+        sanitizedBody = sanitizedBody.split(config.gnaniApiKey).join('[REDACTED]');
+      }
+      sanitizedBody = sanitizedBody.replace(/[A-Za-z0-9_-]{20,}/g, '[REDACTED]').slice(0, 200);
+
       return {
         success: false,
         transcript: '',
@@ -101,37 +150,81 @@ export async function callGnaniPrismaSTT(req: PrismaSTTRequest): Promise<PrismaS
         model: modelName,
         mode,
         errorCode,
-        errorMessage: `Gnani STT returned HTTP ${response.status}: ${errBody.substring(0, 200)}`,
+        errorMessage: `Gnani STT returned HTTP ${response.status}: ${sanitizedBody}`,
       };
     }
 
-    const json = await response.json();
-    
+    let json: unknown;
+    try {
+      json = await response.json();
+    } catch {
+      return {
+        success: false,
+        transcript: '',
+        latencyMs,
+        model: modelName,
+        mode,
+        errorCode: 'INVALID_JSON_RESPONSE',
+        errorMessage: 'Gnani Prisma returned HTTP 200 but response body was not valid JSON.',
+      };
+    }
+
     // Parse transcript from possible Gnani Prisma JSON response shapes
-    let transcript = '';
+    let extractedTranscript = '';
     if (typeof json === 'string') {
-      transcript = json;
-    } else if (json.transcript) {
-      transcript = json.transcript;
-    } else if (json.text) {
-      transcript = json.text;
-    } else if (json.data?.transcript) {
-      transcript = json.data.transcript;
-    } else if (json.result?.transcript) {
-      transcript = json.result.transcript;
-    } else if (Array.isArray(json.result) && json.result[0]?.transcript) {
-      transcript = json.result[0].transcript;
-    } else if (Array.isArray(json) && json[0]?.transcript) {
-      transcript = json[0].transcript;
+      extractedTranscript = json;
+    } else if (json && typeof json === 'object') {
+      const rec = json as Record<string, unknown>;
+      if (typeof rec.transcript === 'string') {
+        extractedTranscript = rec.transcript;
+      } else if (typeof rec.text === 'string') {
+        extractedTranscript = rec.text;
+      } else if (
+        rec.data &&
+        typeof rec.data === 'object' &&
+        typeof (rec.data as Record<string, unknown>).transcript === 'string'
+      ) {
+        extractedTranscript = (rec.data as Record<string, unknown>).transcript as string;
+      } else if (rec.result && typeof rec.result === 'object') {
+        const resObj = rec.result as Record<string, unknown>;
+        if (typeof resObj.transcript === 'string') {
+          extractedTranscript = resObj.transcript;
+        } else if (
+          Array.isArray(rec.result) &&
+          rec.result[0] &&
+          typeof rec.result[0].transcript === 'string'
+        ) {
+          extractedTranscript = rec.result[0].transcript;
+        }
+      } else if (Array.isArray(json) && json[0] && typeof json[0].transcript === 'string') {
+        extractedTranscript = json[0].transcript;
+      }
+    }
+
+    const cleanedTranscript = (extractedTranscript || '').trim();
+
+    // Critical Requirement: A 2xx response with a missing, unrecognized, or empty transcript MUST return failure, NOT success!
+    if (!cleanedTranscript) {
+      return {
+        success: false,
+        transcript: '',
+        latencyMs,
+        model: modelName,
+        mode,
+        errorCode: 'EMPTY_OR_UNRECOGNIZED_TRANSCRIPT',
+        errorMessage:
+          'Gnani Prisma returned a response without a valid or non-empty speech transcript.',
+        rawResponseSummary: JSON.stringify(json).slice(0, 300),
+      };
     }
 
     return {
       success: true,
-      transcript: (transcript || '').trim(),
+      transcript: cleanedTranscript,
       latencyMs,
       model: modelName,
       mode,
-      rawResponseSummary: JSON.stringify(json).substring(0, 300),
+      rawResponseSummary: JSON.stringify(json).slice(0, 300),
     };
   } catch (err: unknown) {
     const latencyMs = Date.now() - startTime;
@@ -148,5 +241,7 @@ export async function callGnaniPrismaSTT(req: PrismaSTTRequest): Promise<PrismaS
         ? 'Gnani Prisma STT request timed out after 15 seconds.'
         : `Network error connecting to Gnani STT: ${(err as Error).message}`,
     };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }

@@ -1,7 +1,9 @@
 /**
  * Pakka Note - Gnani Timbre TTS Integration Service
  * Communicates with Gnani Timbre TTS inference endpoint (Timbre v2.5 / Nalini).
- * Server-side credential handling with audio streaming & base64 conversion.
+ * Sends canonical JSON request payload without duplicate aliases,
+ * validates audio response integrity, detects MIME types accurately,
+ * and cleans up timeouts safely.
  */
 
 import { getServerConfig } from '../config/environment.ts';
@@ -26,12 +28,71 @@ export interface TimbreTTSResponse {
   errorMessage?: string;
 }
 
+const SUPPORTED_LANGUAGES: LanguageCode[] = ['en-IN', 'hi-IN'];
+
+/**
+ * Detects whether an audio buffer is WAV (starts with 'RIFF') or MP3
+ */
+function detectAudioMimeType(buffer: Buffer): string {
+  if (buffer.length >= 4) {
+    const magic = buffer.toString('utf-8', 0, 4);
+    if (magic === 'RIFF') {
+      return 'audio/wav';
+    }
+    if (magic.startsWith('ID3') || (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0)) {
+      return 'audio/mp3';
+    }
+  }
+  return 'audio/wav';
+}
+
 export async function callGnaniTimbreTTS(req: TimbreTTSRequest): Promise<TimbreTTSResponse> {
   const config = getServerConfig();
   const startTime = Date.now();
-  const model = req.model || config.ttsModel;
-  const voice = req.voice || config.ttsVoice;
+  const model = (req.model || config.ttsModel).trim();
+  const voice = (req.voice || config.ttsVoice).trim();
 
+  // 1. Validate inputs
+  if (!req.text || !req.text.trim()) {
+    return {
+      success: false,
+      audioMimeType: 'audio/wav',
+      latencyMs: Date.now() - startTime,
+      model,
+      voice,
+      spokenText: '',
+      errorCode: 'EMPTY_TEXT_INPUT',
+      errorMessage: 'Input text to synthesize is empty.',
+    };
+  }
+
+  if (req.text.length > 20000) {
+    return {
+      success: false,
+      audioMimeType: 'audio/wav',
+      latencyMs: Date.now() - startTime,
+      model,
+      voice,
+      spokenText: req.text.slice(0, 50),
+      errorCode: 'TEXT_TOO_LONG',
+      errorMessage: 'Input text exceeds the maximum 20,000 character limit for TTS synthesis.',
+    };
+  }
+
+  if (!SUPPORTED_LANGUAGES.includes(req.languageCode)) {
+    return {
+      success: false,
+      audioMimeType: 'audio/wav',
+      latencyMs: Date.now() - startTime,
+      model,
+      voice,
+      spokenText: req.text,
+      errorCode: 'UNSUPPORTED_LANGUAGE',
+      errorMessage: `Language code "${req.languageCode}" is not supported. Supported: ${SUPPORTED_LANGUAGES.join(', ')}.`,
+    };
+  }
+
+  // 2. Validate configuration
   if (!config.isGnaniConfigured) {
     return {
       success: false,
@@ -46,19 +107,21 @@ export async function callGnaniTimbreTTS(req: TimbreTTSRequest): Promise<TimbreT
     };
   }
 
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000); // 15-second bounded timeout
 
-    const payload = {
-      text: req.text,
-      input_text: req.text,
+  try {
+    // Canonical Gnani Timbre REST inference payload - strictly required fields, no duplicate aliases
+    const payload: Record<string, string> = {
+      text: req.text.trim(),
       language: req.languageCode,
-      language_code: req.languageCode,
-      model,
-      voice,
+      voice: voice || 'Nalini',
       audio_format: 'wav',
     };
+
+    if (model) {
+      payload.model = model;
+    }
 
     const response = await fetch(config.ttsEndpoint, {
       method: 'POST',
@@ -70,7 +133,6 @@ export async function callGnaniTimbreTTS(req: TimbreTTSRequest): Promise<TimbreT
       signal: controller.signal,
     });
 
-    clearTimeout(timeoutId);
     const latencyMs = Date.now() - startTime;
 
     if (!response.ok) {
@@ -90,6 +152,12 @@ export async function callGnaniTimbreTTS(req: TimbreTTSRequest): Promise<TimbreT
         errorCode = 'GNANI_UPSTREAM_ERROR';
       }
 
+      let sanitizedBody = errBody;
+      if (config.gnaniApiKey) {
+        sanitizedBody = sanitizedBody.split(config.gnaniApiKey).join('[REDACTED]');
+      }
+      sanitizedBody = sanitizedBody.replace(/[A-Za-z0-9_-]{20,}/g, '[REDACTED]').slice(0, 200);
+
       return {
         success: false,
         audioMimeType: 'audio/wav',
@@ -98,23 +166,37 @@ export async function callGnaniTimbreTTS(req: TimbreTTSRequest): Promise<TimbreT
         voice,
         spokenText: req.text,
         errorCode,
-        errorMessage: `Gnani Timbre TTS returned HTTP ${response.status}: ${errBody.substring(0, 200)}`,
+        errorMessage: `Gnani Timbre TTS returned HTTP ${response.status}: ${sanitizedBody}`,
       };
     }
 
     const contentType = response.headers.get('content-type') || '';
-    
-    // If response is raw binary audio
+
+    // Handle binary stream response
     if (contentType.includes('audio') || contentType.includes('octet-stream')) {
       const arrayBuffer = await response.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
+
+      if (buffer.length < 44) {
+        return {
+          success: false,
+          audioMimeType: 'audio/wav',
+          latencyMs,
+          model,
+          voice,
+          spokenText: req.text,
+          errorCode: 'AUDIO_TRUNCATED',
+          errorMessage: `Gnani Timbre returned truncated audio payload (${buffer.length} bytes).`,
+        };
+      }
+
+      const detectedMime = detectAudioMimeType(buffer);
       const audioBase64 = buffer.toString('base64');
-      const mime = contentType.includes('mp3') ? 'audio/mp3' : 'audio/wav';
 
       return {
         success: true,
         audioBase64,
-        audioMimeType: mime,
+        audioMimeType: detectedMime,
         latencyMs,
         model,
         voice,
@@ -122,29 +204,56 @@ export async function callGnaniTimbreTTS(req: TimbreTTSRequest): Promise<TimbreT
       };
     }
 
-    // Otherwise JSON containing base64 audio
-    const json = await response.json();
+    // Handle JSON response
+    let json: unknown;
+    try {
+      json = await response.json();
+    } catch {
+      return {
+        success: false,
+        audioMimeType: 'audio/wav',
+        latencyMs,
+        model,
+        voice,
+        spokenText: req.text,
+        errorCode: 'INVALID_JSON_RESPONSE',
+        errorMessage:
+          'Gnani Timbre returned HTTP 200 but body was neither valid audio nor valid JSON.',
+      };
+    }
+
     let audioBase64 = '';
     let mime = 'audio/wav';
 
-    if (json.audio_content) {
-      audioBase64 = json.audio_content;
-    } else if (json.data?.audio) {
-      audioBase64 = json.data.audio;
-    } else if (json.audio) {
-      audioBase64 = json.audio;
-    } else if (json.result?.audio) {
-      audioBase64 = json.result.audio;
+    if (json && typeof json === 'object') {
+      const rec = json as Record<string, unknown>;
+      if (typeof rec.audio_content === 'string') {
+        audioBase64 = rec.audio_content;
+      } else if (typeof rec.audio === 'string') {
+        audioBase64 = rec.audio;
+      } else if (
+        rec.data &&
+        typeof rec.data === 'object' &&
+        typeof (rec.data as Record<string, unknown>).audio === 'string'
+      ) {
+        audioBase64 = (rec.data as Record<string, unknown>).audio as string;
+      } else if (
+        rec.result &&
+        typeof rec.result === 'object' &&
+        typeof (rec.result as Record<string, unknown>).audio === 'string'
+      ) {
+        audioBase64 = (rec.result as Record<string, unknown>).audio as string;
+      }
     }
 
-    // Strip data URI prefix if present
+    // Clean data URI prefix if returned by provider
     if (audioBase64.includes('base64,')) {
       const parts = audioBase64.split('base64,');
       audioBase64 = parts[1];
       if (parts[0].includes('mp3')) mime = 'audio/mp3';
     }
 
-    if (!audioBase64) {
+    if (!audioBase64 || audioBase64.length < 64) {
       return {
         success: false,
         audioMimeType: 'audio/wav',
@@ -153,7 +262,8 @@ export async function callGnaniTimbreTTS(req: TimbreTTSRequest): Promise<TimbreT
         voice,
         spokenText: req.text,
         errorCode: 'EMPTY_AUDIO_RESPONSE',
-        errorMessage: 'Gnani Timbre returned HTTP 200 but no audio_content was found in the JSON response.',
+        errorMessage:
+          'Gnani Timbre returned HTTP 200 but no valid audio content was found in the response.',
       };
     }
 
@@ -182,5 +292,7 @@ export async function callGnaniTimbreTTS(req: TimbreTTSRequest): Promise<TimbreT
         ? 'Gnani Timbre TTS request timed out after 15 seconds.'
         : `Network error connecting to Gnani Timbre TTS: ${(err as Error).message}`,
     };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }

@@ -1,16 +1,33 @@
 /**
  * Pakka Note - Synthetic Benchmark & Evaluation Suite
  * Evaluates B0 (Verbatim), B1 (Transcribe/ITN), B2 (Field Engine), B3 (Field Engine + 1-step Correction)
- * Never hallucinates or fabricates fake results; strictly records actual test outcomes.
+ *
+ * BENCHMARK HONESTY:
+ * - When run offline or with fixtures, results are explicitly labelled:
+ *   evaluationMode: 'simulated_transcript_regression'
+ * - Live calls require verified GNANI_API_KEY; live results record genuine STT responses.
+ * - Never hallucinates or fabricates fake results.
  */
 
 import type { BenchmarkCase, BenchmarkRun } from '../../types/index.ts';
 import { validateFieldCandidate } from '../../lib/fieldEngine.ts';
 import { applyCorrection } from '../../lib/confirmationStateMachine.ts';
+import { getServerConfig } from '../config/environment.ts';
+import { callGnaniPrismaSTT } from './gnaniPrisma.ts';
 
 export const SYNTHETIC_BENCHMARK_FIXTURES: Omit<
   BenchmarkCase,
-  'b0_verbatim' | 'b1_transcribe' | 'b2_fieldEngine' | 'b3_corrected' | 'exactMatchB0' | 'exactMatchB1' | 'exactMatchB2' | 'exactMatchB3' | 'validFormatB2' | 'latencyMs' | 'status'
+  | 'b0_verbatim'
+  | 'b1_transcribe'
+  | 'b2_fieldEngine'
+  | 'b3_corrected'
+  | 'exactMatchB0'
+  | 'exactMatchB1'
+  | 'exactMatchB2'
+  | 'exactMatchB3'
+  | 'validFormatB2'
+  | 'latencyMs'
+  | 'status'
 >[] = [
   {
     caseId: 'SYNTH-MOB-01',
@@ -82,7 +99,8 @@ export const SYNTHETIC_BENCHMARK_FIXTURES: Omit<
     expectedValue: '9876543210',
     audioCondition: 'clean',
     category: 'correction_case',
-    notes: 'Initial candidate had typo in last 2 digits (9876543299); repaired via replace_last_n to 10',
+    notes:
+      'Initial candidate had typo in last 2 digits (9876543299); repaired via replace_last_n to 10',
   },
   {
     caseId: 'SYNTH-SILENCE-09',
@@ -152,12 +170,53 @@ const SIMULATED_TRANSCRIPTS: Record<
 };
 
 /**
+ * Creates a minimal valid synthetic 16kHz WAV header & buffer for live audio testing
+ */
+function createSyntheticTestWavBuffer(durationSeconds = 1.0, freq = 440): Buffer {
+  const sampleRate = 16000;
+  const numSamples = Math.floor(sampleRate * durationSeconds);
+  const dataSize = numSamples * 2;
+  const buffer = Buffer.alloc(44 + dataSize);
+
+  // RIFF header
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + dataSize, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20); // PCM
+  buffer.writeUInt16LE(1, 22); // Mono
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * 2, 28);
+  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(dataSize, 40);
+
+  let offset = 44;
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.sin((2 * Math.PI * freq * i) / sampleRate) * 0.3;
+    const intVal = Math.round(s * 0x7fff);
+    buffer.writeInt16LE(intVal, offset);
+    offset += 2;
+  }
+  return buffer;
+}
+
+/**
  * Executes a full comparative benchmark run across B0, B1, B2, and B3
  */
-export function runSyntheticBenchmark(isLiveApi = false): BenchmarkRun {
+export async function runSyntheticBenchmark(isLiveRequested = false): Promise<BenchmarkRun> {
+  const config = getServerConfig();
   const runId = `bm_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
   const startTime = Date.now();
   const cases: BenchmarkCase[] = [];
+
+  // Honesty Check: Only run as live_gnani_api if live was requested AND API key is configured
+  const actuallyLive = isLiveRequested && config.isGnaniConfigured;
+  const evaluationMode: 'simulated_transcript_regression' | 'live_gnani_api' = actuallyLive
+    ? 'live_gnani_api'
+    : 'simulated_transcript_regression';
 
   let matchB0 = 0;
   let matchB1 = 0;
@@ -172,13 +231,32 @@ export function runSyntheticBenchmark(isLiveApi = false): BenchmarkRun {
 
   for (const fixture of SYNTHETIC_BENCHMARK_FIXTURES) {
     const caseStartTime = Date.now();
-    const sim = SIMULATED_TRANSCRIPTS[fixture.caseId] || {
-      verbatim: fixture.expectedValue,
-      transcribe: fixture.expectedValue,
-    };
+    let b0_verbatim = '';
+    let b1_transcribe = '';
+    let caseLatencyMs = 12;
 
-    const b0_verbatim = sim.verbatim;
-    const b1_transcribe = sim.transcribe;
+    if (actuallyLive) {
+      // Execute genuine live STT requests with synthetic audio
+      const audioBuf = createSyntheticTestWavBuffer(1.5, 440);
+      const liveRes = await callGnaniPrismaSTT({
+        audioBuffer: audioBuf,
+        mimeType: 'audio/wav',
+        languageCode: fixture.language,
+        format: 'transcribe',
+      });
+      caseLatencyMs = liveRes.latencyMs;
+      b1_transcribe = liveRes.transcript || '';
+      b0_verbatim = liveRes.transcript || '';
+    } else {
+      // Standard reproducible simulated-transcript regression fixture
+      const sim = SIMULATED_TRANSCRIPTS[fixture.caseId] || {
+        verbatim: fixture.expectedValue,
+        transcribe: fixture.expectedValue,
+      };
+      b0_verbatim = sim.verbatim;
+      b1_transcribe = sim.transcribe;
+      caseLatencyMs = 12;
+    }
 
     // B2: Field Engine validation
     const b2_val = validateFieldCandidate(fixture.field, b1_transcribe);
@@ -208,7 +286,7 @@ export function runSyntheticBenchmark(isLiveApi = false): BenchmarkRun {
     let exactMatchB1 = false;
     let exactMatchB2 = false;
     let exactMatchB3 = false;
-    let validFormatB2 = b2_val.valid;
+    const validFormatB2 = b2_val.valid;
     let caseStatus: 'pass' | 'fail' | 'rejected_as_expected' = 'pass';
 
     if (isNegativeOrInvalidCase) {
@@ -252,7 +330,7 @@ export function runSyntheticBenchmark(isLiveApi = false): BenchmarkRun {
       exactMatchB2,
       exactMatchB3,
       validFormatB2,
-      latencyMs: Date.now() - caseStartTime + 12,
+      latencyMs: Date.now() - caseStartTime + caseLatencyMs,
       status: caseStatus,
     });
   }
@@ -261,10 +339,17 @@ export function runSyntheticBenchmark(isLiveApi = false): BenchmarkRun {
   const invalidDenom = Math.max(1, invalidTestCases);
   const corrDenom = Math.max(1, correctionCases);
 
+  const notes = actuallyLive
+    ? 'Live Gnani API benchmark execution. Real network requests were sent to Gnani Prisma v3.'
+    : isLiveRequested
+      ? 'Live API mode was requested, but Gnani API credentials are not configured. Run executed and labelled as simulated-transcript regression.'
+      : 'Simulated-transcript regression benchmark suite executed against verified regression fixtures.';
+
   return {
     runId,
     timestamp: new Date().toISOString(),
-    isLiveApi,
+    isLiveApi: actuallyLive,
+    evaluationMode,
     sampleCount: cases.length,
     exactMatchB0Rate: Math.round((matchB0 / denom) * 100),
     exactMatchB1Rate: Math.round((matchB1 / denom) * 100),
@@ -275,6 +360,7 @@ export function runSyntheticBenchmark(isLiveApi = false): BenchmarkRun {
     correctionSuccessRate: Math.round((correctionSuccesses / corrDenom) * 100),
     avgCaptureLatencyMs: Math.round((Date.now() - startTime) / cases.length),
     cases,
+    notes,
   };
 }
 
@@ -282,6 +368,20 @@ export function runSyntheticBenchmark(isLiveApi = false): BenchmarkRun {
  * Converts benchmark run results into CSV format
  */
 export function benchmarkRunToCSV(run: BenchmarkRun): string {
+  const metadataHeaders = [
+    `# Pakka Note Benchmark Evaluation Export`,
+    `# Run ID: ${run.runId}`,
+    `# Timestamp: ${run.timestamp}`,
+    `# Evaluation Mode: ${run.evaluationMode}`,
+    `# Is Live API: ${run.isLiveApi ? 'YES' : 'NO'}`,
+    `# Sample Count: ${run.sampleCount}`,
+    `# Exact Match B2 (FieldEngine): ${run.exactMatchB2Rate}%`,
+    `# Invalid Rejection Rate: ${run.invalidFormatRejectionRate}%`,
+    `# False Acceptance Rate: ${run.falseAcceptanceRate}%`,
+    `# Notes: ${run.notes || ''}`,
+    '',
+  ];
+
   const headers = [
     'Case ID',
     'Category',
@@ -322,5 +422,5 @@ export function benchmarkRunToCSV(run: BenchmarkRun): string {
     `"${(c.notes || '').replace(/"/g, '""')}"`,
   ]);
 
-  return [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+  return [...metadataHeaders, headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
 }

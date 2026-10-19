@@ -74,13 +74,29 @@ export const CapturePage: React.FC<CapturePageProps> = ({ health, onSessionUpdat
   const [confirmationNotice, setConfirmationNotice] = useState<string | null>(null);
 
   const isGnaniConfigured = Boolean(health?.gnaniConfig.sttConfigured && health?.gnaniConfig.ttsConfigured);
+  const audioUrlRef = useRef<string | null>(null);
+  const maxDurationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Cleanup audio tracks on unmount
+  const updateAudioUrl = (newUrl: string | null) => {
+    if (audioUrlRef.current && audioUrlRef.current !== newUrl) {
+      URL.revokeObjectURL(audioUrlRef.current);
+    }
+    audioUrlRef.current = newUrl;
+    setAudioUrl(newUrl);
+  };
+
+  // Cleanup audio tracks and object URLs on unmount
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      if (maxDurationTimeoutRef.current) clearTimeout(maxDurationTimeoutRef.current);
       if (audioStreamRef.current) {
         audioStreamRef.current.getTracks().forEach((track) => track.stop());
+        audioStreamRef.current = null;
+      }
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
       }
     };
   }, []);
@@ -131,7 +147,7 @@ export const CapturePage: React.FC<CapturePageProps> = ({ health, onSessionUpdat
       };
 
       mediaRecorder.onstop = async () => {
-        const rawBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType });
+        const rawBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
         try {
           // Convert to standard mono 16kHz WAV PCM
           const arrayBuffer = await rawBlob.arrayBuffer();
@@ -140,13 +156,13 @@ export const CapturePage: React.FC<CapturePageProps> = ({ health, onSessionUpdat
           const wavBlob = encodeWAV(audioBuffer);
 
           setCapturedBlob(wavBlob);
-          setAudioUrl(URL.createObjectURL(wavBlob));
+          updateAudioUrl(URL.createObjectURL(wavBlob));
           setAudioSourceType('mic');
           setCurrentState('captured');
         } catch (err) {
           console.warn('[Audio] PCM conversion fallback, using raw container:', err);
           setCapturedBlob(rawBlob);
-          setAudioUrl(URL.createObjectURL(rawBlob));
+          updateAudioUrl(URL.createObjectURL(rawBlob));
           setAudioSourceType('mic');
           setCurrentState('captured');
         } finally {
@@ -161,6 +177,12 @@ export const CapturePage: React.FC<CapturePageProps> = ({ health, onSessionUpdat
       mediaRecorder.start(250);
       setIsRecording(true);
       setRecordingSeconds(0);
+
+      // Hard safety timer for 30 seconds
+      if (maxDurationTimeoutRef.current) clearTimeout(maxDurationTimeoutRef.current);
+      maxDurationTimeoutRef.current = setTimeout(() => {
+        stopRecording();
+      }, 30000);
     } catch (err) {
       setErrorMessage(
         err instanceof Error
@@ -171,15 +193,27 @@ export const CapturePage: React.FC<CapturePageProps> = ({ health, onSessionUpdat
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
+    if (maxDurationTimeoutRef.current) {
+      clearTimeout(maxDurationTimeoutRef.current);
+      maxDurationTimeoutRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
-      setIsRecording(false);
+    }
+    setIsRecording(false);
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach((track) => track.stop());
     }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (!file.type.startsWith('audio/') && !file.name.match(/\.(wav|mp3|m4a|ogg|webm|flac|aac)$/i)) {
+      setErrorMessage('Invalid file type. Please upload an audio file (.wav, .mp3, .m4a, .ogg, or .webm).');
+      return;
+    }
 
     if (file.size > 10 * 1024 * 1024) {
       setErrorMessage('Audio file size exceeds 10MB limit. Please upload a shorter sample.');
@@ -190,7 +224,7 @@ export const CapturePage: React.FC<CapturePageProps> = ({ health, onSessionUpdat
     setCaptureResult(null);
     setReadBackResult(null);
     setCapturedBlob(file);
-    setAudioUrl(URL.createObjectURL(file));
+    updateAudioUrl(URL.createObjectURL(file));
     setAudioSourceType('upload');
     setCurrentState('captured');
   };
@@ -210,7 +244,7 @@ export const CapturePage: React.FC<CapturePageProps> = ({ health, onSessionUpdat
     // Generate test synthetic audio wave
     const synthAudio = generateSyntheticWavAudio(2.0, 500);
     setCapturedBlob(synthAudio);
-    setAudioUrl(URL.createObjectURL(synthAudio));
+    updateAudioUrl(URL.createObjectURL(synthAudio));
     setAudioSourceType('synthetic_preset');
     setCurrentState('captured');
 
@@ -314,9 +348,11 @@ export const CapturePage: React.FC<CapturePageProps> = ({ health, onSessionUpdat
         setCurrentState('confirmed');
         setConfirmationNotice(res.message);
         if (onSessionUpdated) onSessionUpdated();
+      } else {
+        setErrorMessage(res.message || 'Confirmation was not accepted by server.');
       }
     } catch (err) {
-      setErrorMessage('Confirmation failed to record.');
+      setErrorMessage(err instanceof Error ? err.message : 'Confirmation failed to record.');
     }
   };
 

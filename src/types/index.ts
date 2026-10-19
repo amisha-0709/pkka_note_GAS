@@ -188,6 +188,7 @@ export interface BenchmarkRun {
   runId: string;
   timestamp: string;
   isLiveApi: boolean;
+  evaluationMode: 'simulated_transcript_regression' | 'live_gnani_api';
   sampleCount: number;
   exactMatchB0Rate: number;
   exactMatchB1Rate: number;
@@ -198,4 +199,5 @@ export interface BenchmarkRun {
   correctionSuccessRate: number;
   avgCaptureLatencyMs: number;
   cases: BenchmarkCase[];
+  notes?: string;
 }
