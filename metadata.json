@@ -1,0 +1,6 @@
+{
+  "name": "Pakka Note",
+  "description": "Voice-to-structured-data verification: capture, validate, read back, and confirm spoken identifiers with Gnani AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
