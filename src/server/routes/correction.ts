@@ -54,6 +54,14 @@ correctionRouter.post('/api/correction', async (req, res) => {
       });
     }
 
+    if (capture.normalizedCandidate !== previousCandidate) {
+      return res.status(409).json({
+        success: false,
+        errorCode: 'STALE_CANDIDATE',
+        message: `Submitted previousCandidate "${previousCandidate}" does not match the active capture candidate "${capture.normalizedCandidate}".`,
+      });
+    }
+
     const fieldType = (field || capture.field || 'mobile_number') as FieldType;
 
     // 3. Validate partial-correction parameters

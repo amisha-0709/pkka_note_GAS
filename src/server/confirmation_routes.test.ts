@@ -595,4 +595,115 @@ describe('Route-Level HTTP Confirmation & Verification Tests', () => {
 
     auditDb.setSimulateWriteFailure(false);
   });
+
+  test('Route: Read-back rejects nonexistent capture (HTTP 404), mismatched session (HTTP 400), and stale candidate (HTTP 409)', async () => {
+    const sessionId = `sess_rb_val_${Date.now()}`;
+    const captureId = `cap_rb_val_${Date.now()}`;
+    const candidate = '9876543210';
+
+    await auditDb.createOrGetSession(sessionId, 'mobile_number', 'en-IN');
+    await auditDb.insertCapture({
+      captureId,
+      sessionId,
+      attempt: 1,
+      timestamp: new Date().toISOString(),
+      field: 'mobile_number',
+      language: 'en-IN',
+      model: 'Prisma v3',
+      modelVersion: 'v3',
+      mode: 'transcribe',
+      audioFormat: 'audio/wav',
+      rawTranscript: candidate,
+      normalizedCandidate: candidate,
+      validityStatus: 'valid_candidate',
+      validationMessage: 'Valid 10-digit mobile number',
+      attempts: 1,
+      latencyMs: 100,
+    });
+
+    // 1. Nonexistent capture
+    const nonExistentRes = await fetch(`${baseUrl}/api/readback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        captureId: 'nonexistent_capture_id',
+        candidate,
+      }),
+    });
+    assert.equal(nonExistentRes.status, 404);
+    const nonExistentJson = await nonExistentRes.json();
+    assert.equal(nonExistentJson.errorCode, 'NONEXISTENT_CAPTURE');
+
+    // 2. Mismatched session
+    const mismatchedRes = await fetch(`${baseUrl}/api/readback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'wrong_session_id',
+        captureId,
+        candidate,
+      }),
+    });
+    assert.equal(mismatchedRes.status, 400);
+    const mismatchedJson = await mismatchedRes.json();
+    assert.equal(mismatchedJson.errorCode, 'CAPTURE_SESSION_MISMATCH');
+
+    // 3. Stale candidate
+    const staleRes = await fetch(`${baseUrl}/api/readback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        captureId,
+        candidate: '9999999999', // doesn't match active capture
+      }),
+    });
+    assert.equal(staleRes.status, 409);
+    const staleJson = await staleRes.json();
+    assert.equal(staleJson.errorCode, 'STALE_CANDIDATE');
+  });
+
+  test('Route: Correction rejects stale previousCandidate with HTTP 409 STALE_CANDIDATE', async () => {
+    const sessionId = `sess_corr_stale_${Date.now()}`;
+    const captureId = `cap_corr_stale_${Date.now()}`;
+    const activeCandidate = '9876543210';
+
+    await auditDb.createOrGetSession(sessionId, 'mobile_number', 'en-IN');
+    await auditDb.insertCapture({
+      captureId,
+      sessionId,
+      attempt: 1,
+      timestamp: new Date().toISOString(),
+      field: 'mobile_number',
+      language: 'en-IN',
+      model: 'Prisma v3',
+      modelVersion: 'v3',
+      mode: 'transcribe',
+      audioFormat: 'audio/wav',
+      rawTranscript: activeCandidate,
+      normalizedCandidate: activeCandidate,
+      validityStatus: 'valid_candidate',
+      validationMessage: 'Valid 10-digit mobile number',
+      attempts: 1,
+      latencyMs: 100,
+    });
+
+    const res = await fetch(`${baseUrl}/api/correction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        captureId,
+        previousCandidate: '1111111111', // stale candidate, mismatch with 9876543210
+        mode: 'full',
+        correctionInput: '9876543219',
+      }),
+    });
+
+    assert.equal(res.status, 409);
+    const json = await res.json();
+    assert.equal(json.success, false);
+    assert.equal(json.errorCode, 'STALE_CANDIDATE');
+  });
 });

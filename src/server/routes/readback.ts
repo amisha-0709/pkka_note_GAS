@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { FieldType, LanguageCode } from '../../types/index.ts';
 import { callGnaniTimbreTTS } from '../services/gnaniTimbre.ts';
-import { formatReadBackText } from '../../lib/fieldEngine.ts';
+import { formatReadBackText, validateFieldCandidate } from '../../lib/fieldEngine.ts';
 import { auditDb } from '../persistence/database.ts';
 import { createStateEvent } from '../../lib/confirmationStateMachine.ts';
 
@@ -11,16 +11,51 @@ readbackRouter.post('/api/readback', async (req, res) => {
   try {
     const { candidate, field, language, sessionId, captureId, attempt = 1 } = req.body;
 
-    if (!candidate) {
+    if (!sessionId || !captureId || !candidate) {
       return res.status(400).json({
         success: false,
-        errorCode: 'MISSING_CANDIDATE',
-        message: 'No candidate value provided for read-back synthesis.',
+        errorCode: 'MISSING_PARAMETERS',
+        message: 'sessionId, captureId, and candidate are all strictly required for read-back synthesis.',
       });
     }
 
-    const fieldType = (field || 'mobile_number') as FieldType;
+    const capture = auditDb.getCapture(captureId);
+    if (!capture) {
+      return res.status(404).json({
+        success: false,
+        errorCode: 'NONEXISTENT_CAPTURE',
+        message: `Capture record "${captureId}" does not exist in audit database.`,
+      });
+    }
+
+    if (capture.sessionId !== sessionId) {
+      return res.status(400).json({
+        success: false,
+        errorCode: 'CAPTURE_SESSION_MISMATCH',
+        message: `Capture "${captureId}" belongs to session "${capture.sessionId}", not "${sessionId}".`,
+      });
+    }
+
+    if (capture.normalizedCandidate !== candidate) {
+      return res.status(409).json({
+        success: false,
+        errorCode: 'STALE_CANDIDATE',
+        message: `Submitted candidate "${candidate}" does not match active capture candidate "${capture.normalizedCandidate}".`,
+      });
+    }
+
+    const fieldType = (field || capture.field || 'mobile_number') as FieldType;
     const langCode = (language || 'en-IN') as LanguageCode;
+
+    // Validate field candidate format
+    const validation = validateFieldCandidate(fieldType, candidate);
+    if (!validation.valid || capture.validityStatus !== 'valid_candidate') {
+      return res.status(422).json({
+        success: false,
+        errorCode: 'INVALID_CANDIDATE',
+        message: `Candidate "${candidate}" is invalid (${validation.validationMessage}) and cannot be read back.`,
+      });
+    }
 
     // Format read-back text for maximum phonetic clarity
     const spokenText = formatReadBackText(candidate, fieldType);
@@ -67,6 +102,7 @@ readbackRouter.post('/api/readback', async (req, res) => {
             latencyMs: ttsResult.latencyMs,
           })
         );
+        await auditDb.updateSessionStatus(sessionId, 'read_back');
       } catch (dbErr) {
         console.error('[ReadBack] Failed to record read-back event:', dbErr);
         return res.status(500).json({
