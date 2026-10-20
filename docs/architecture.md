@@ -28,7 +28,7 @@ CAPTURE → TRANSCRIBE → PARSE → VALIDATE → READ BACK → CONFIRM OR CORRE
 │  - /api/confirmation (Strict affirmative / negative parser) │
 │  - /api/correction (Targeted partial / full replacer)       │
 │  - /api/records (Session chronological state events)        │
-│  - /api/benchmark (Standardized regression matrix)          │
+│  - /api/benchmark (Simulated regression & smoke testing)    │
 └──────────────▲──────────────────────────────▲───────────────┘
                │                              │
     ┌──────────▼──────────┐        ┌──────────▼──────────┐
@@ -44,3 +44,10 @@ CAPTURE → TRANSCRIBE → PARSE → VALIDATE → READ BACK → CONFIRM OR CORRE
 1. **Zero Secret Leakage**: `GNANI_API_KEY` is read strictly from `process.env.GNANI_API_KEY` server-side. It is never transmitted to the browser, never written to audit files, and never logged in error traces.
 2. **Audio Minimization**: In standard operation, audio buffers are processed in memory and released immediately after transcription. No raw customer audio is stored on disk.
 3. **Synthetic Policy**: The application operates under a strict synthetic data protocol for challenge evaluation and testing.
+
+## 4. Audit Persistence Architecture
+
+- **Storage Engine**: Container-local file-backed JSON store at `data/pakka_note_audit.json`.
+- **Concurrency & Atomicity**: Write requests are serialized via an internal Promise queue and committed to disk via atomic temporary file renaming.
+- **Observable Persistence**: State finalization operations explicitly await `auditDb.flush()`. If disk write fails, changes are rolled back in memory and an HTTP 500 error is returned, preventing phantom confirmations.
+- **Production Durability Road-map**: In ephemeral container runtimes (such as Google Cloud Run or AI Studio preview instances), container-local files do not persist across restarts or redeployments. For production multi-instance durability, Cloud SQL (PostgreSQL with Drizzle ORM) or Google Cloud Firestore is the recommended target.

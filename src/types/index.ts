@@ -152,12 +152,17 @@ export interface SystemHealth {
   };
 }
 
+export type BenchmarkEvaluationMode =
+  | 'simulated_transcript_regression'
+  | 'provider_connectivity_smoke_test'
+  | 'live_synthetic_speech_benchmark';
+
 export interface BenchmarkCase {
   caseId: string;
   field: FieldType;
   language: LanguageCode;
   expectedValue: string;
-  audioCondition: 'clean' | 'degraded_telephony' | 'simulated_transcript';
+  audioCondition: 'clean' | 'degraded_telephony' | 'simulated_transcript' | 'synthetic_tone' | 'synthetic_speech_clip';
   category:
     | 'valid_mobile'
     | 'eight_digit_mobile'
@@ -168,7 +173,8 @@ export interface BenchmarkCase {
     | 'correction_case'
     | 'silence_case'
     | 'service_tag_nato'
-    | 'spelled_name';
+    | 'spelled_name'
+    | 'tone_connectivity_smoke';
   notes: string;
   // Execution results
   b0_verbatim?: string;
@@ -181,14 +187,16 @@ export interface BenchmarkCase {
   exactMatchB3?: boolean;
   validFormatB2?: boolean;
   latencyMs?: number;
-  status?: 'pass' | 'fail' | 'rejected_as_expected';
+  status?: 'pass' | 'fail' | 'rejected_as_expected' | 'smoke_ok' | 'smoke_failed' | 'prerequisite_missing';
+  b0_error?: string;
+  b1_error?: string;
 }
 
 export interface BenchmarkRun {
   runId: string;
   timestamp: string;
   isLiveApi: boolean;
-  evaluationMode: 'simulated_transcript_regression' | 'live_gnani_api';
+  evaluationMode: BenchmarkEvaluationMode;
   sampleCount: number;
   exactMatchB0Rate: number;
   exactMatchB1Rate: number;
@@ -200,4 +208,6 @@ export interface BenchmarkRun {
   avgCaptureLatencyMs: number;
   cases: BenchmarkCase[];
   notes?: string;
+  prerequisites?: string[];
 }
+

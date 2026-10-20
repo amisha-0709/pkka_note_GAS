@@ -220,7 +220,12 @@ export const BenchmarkPage: React.FC<BenchmarkPageProps> = ({ health }) => {
                     Standardized Synthetic Test Case Manifest ({selectedRun.cases.length} cases)
                   </h3>
                   <span className="text-[11px] text-slate-500 font-mono">
-                    Mode: {selectedRun.isLiveApi ? 'Live Gnani API' : 'Synthetic Regression Fixtures'}
+                    Mode:{' '}
+                    {selectedRun.evaluationMode === 'simulated_transcript_regression'
+                      ? 'Simulated Regression Fixtures (Offline)'
+                      : selectedRun.evaluationMode === 'provider_connectivity_smoke_test'
+                        ? 'Provider Connectivity Smoke Test (440Hz Tone - Non-speech)'
+                        : 'Live Synthetic Speech Benchmark'}
                   </span>
                 </div>
 

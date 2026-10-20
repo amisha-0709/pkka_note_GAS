@@ -2,16 +2,29 @@ import { Router } from 'express';
 import {
   runSyntheticBenchmark,
   benchmarkRunToCSV,
+  type BenchmarkRunOptions,
 } from '../services/syntheticBenchmarkSuite.ts';
 import { auditDb } from '../persistence/database.ts';
+import type { BenchmarkEvaluationMode } from '../../types/index.ts';
 
 export const benchmarkRouter = Router();
 
 benchmarkRouter.post('/api/benchmark/run', async (req, res) => {
   try {
-    const isLive = req.body?.isLiveApi === true;
-    const result = await runSyntheticBenchmark(isLive);
-    auditDb.saveBenchmarkRun(result);
+    const mode = (req.body?.mode ||
+      (req.body?.isLiveApi === true ? 'provider_connectivity_smoke_test' : 'simulated_transcript_regression')) as BenchmarkEvaluationMode;
+
+    const options: BenchmarkRunOptions = {
+      mode,
+    };
+
+    const result = await runSyntheticBenchmark(options);
+
+    try {
+      await auditDb.saveBenchmarkRun(result);
+    } catch (dbErr) {
+      console.error('[Benchmark Route] Failed to persist benchmark run to auditDb:', dbErr);
+    }
 
     res.json({
       success: true,

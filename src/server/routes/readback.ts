@@ -8,68 +8,90 @@ import { createStateEvent } from '../../lib/confirmationStateMachine.ts';
 export const readbackRouter = Router();
 
 readbackRouter.post('/api/readback', async (req, res) => {
-  const { candidate, field, language, sessionId, captureId, attempt = 1 } = req.body;
+  try {
+    const { candidate, field, language, sessionId, captureId, attempt = 1 } = req.body;
 
-  if (!candidate) {
-    return res.status(400).json({
-      success: false,
-      errorCode: 'MISSING_CANDIDATE',
-      message: 'No candidate value provided for read-back synthesis.',
-    });
-  }
-
-  const fieldType = (field || 'mobile_number') as FieldType;
-  const langCode = (language || 'en-IN') as LanguageCode;
-
-  // Format read-back text for maximum phonetic clarity
-  const spokenText = formatReadBackText(candidate, fieldType);
-
-  const ttsResult = await callGnaniTimbreTTS({
-    text: spokenText,
-    languageCode: langCode,
-  });
-
-  if (!ttsResult.success) {
-    if (sessionId) {
-      auditDb.insertEvent(
-        createStateEvent(sessionId, 'valid_candidate', 'failed', attempt, captureId, undefined, {
-          candidate,
-          error: ttsResult.errorMessage,
-          errorCode: ttsResult.errorCode,
-          spokenText,
-        })
-      );
+    if (!candidate) {
+      return res.status(400).json({
+        success: false,
+        errorCode: 'MISSING_CANDIDATE',
+        message: 'No candidate value provided for read-back synthesis.',
+      });
     }
 
-    const statusCode = ttsResult.errorCode === 'GNANI_API_KEY_NOT_CONFIGURED' ? 503 : 502;
-    return res.status(statusCode).json({
-      success: false,
+    const fieldType = (field || 'mobile_number') as FieldType;
+    const langCode = (language || 'en-IN') as LanguageCode;
+
+    // Format read-back text for maximum phonetic clarity
+    const spokenText = formatReadBackText(candidate, fieldType);
+
+    const ttsResult = await callGnaniTimbreTTS({
+      text: spokenText,
+      languageCode: langCode,
+    });
+
+    if (!ttsResult.success) {
+      if (sessionId) {
+        try {
+          await auditDb.insertEvent(
+            createStateEvent(sessionId, 'valid_candidate', 'failed', attempt, captureId, undefined, {
+              candidate,
+              error: ttsResult.errorMessage,
+              errorCode: ttsResult.errorCode,
+              spokenText,
+            })
+          );
+        } catch (dbErr) {
+          console.error('[ReadBack] Failed to record failure event:', dbErr);
+        }
+      }
+
+      const statusCode = ttsResult.errorCode === 'GNANI_API_KEY_NOT_CONFIGURED' ? 503 : 502;
+      return res.status(statusCode).json({
+        success: false,
+        spokenText,
+        errorCode: ttsResult.errorCode,
+        message: ttsResult.errorMessage,
+        latencyMs: ttsResult.latencyMs,
+      });
+    }
+
+    if (sessionId) {
+      try {
+        await auditDb.insertEvent(
+          createStateEvent(sessionId, 'valid_candidate', 'read_back', attempt, captureId, undefined, {
+            candidate,
+            spokenText,
+            model: ttsResult.model,
+            voice: ttsResult.voice,
+            latencyMs: ttsResult.latencyMs,
+          })
+        );
+      } catch (dbErr) {
+        console.error('[ReadBack] Failed to record read-back event:', dbErr);
+        return res.status(500).json({
+          success: false,
+          errorCode: 'AUDIT_PERSISTENCE_FAILED',
+          message: 'Audio synthesized successfully but audit event persistence failed.',
+        });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
       spokenText,
-      errorCode: ttsResult.errorCode,
-      message: ttsResult.errorMessage,
+      audioBase64: ttsResult.audioBase64,
+      audioMimeType: ttsResult.audioMimeType,
       latencyMs: ttsResult.latencyMs,
+      model: ttsResult.model,
+      voice: ttsResult.voice,
+    });
+  } catch (err) {
+    console.error('[ReadBack] Unhandled error:', err);
+    res.status(500).json({
+      success: false,
+      errorCode: 'INTERNAL_SERVER_ERROR',
+      message: 'An unexpected internal error occurred during readback.',
     });
   }
-
-  if (sessionId) {
-    auditDb.insertEvent(
-      createStateEvent(sessionId, 'valid_candidate', 'read_back', attempt, captureId, undefined, {
-        candidate,
-        spokenText,
-        model: ttsResult.model,
-        voice: ttsResult.voice,
-        latencyMs: ttsResult.latencyMs,
-      })
-    );
-  }
-
-  res.status(200).json({
-    success: true,
-    spokenText,
-    audioBase64: ttsResult.audioBase64,
-    audioMimeType: ttsResult.audioMimeType,
-    latencyMs: ttsResult.latencyMs,
-    model: ttsResult.model,
-    voice: ttsResult.voice,
-  });
 });

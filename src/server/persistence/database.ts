@@ -2,12 +2,20 @@
  * Pakka Note - Local JSON Audit Store
  * File-backed audit persistence (container-local JSON store).
  *
- * NOTE ON RUNTIME PERSISTENCE:
- * This store persists audit records to container-local storage at `data/pakka_note_audit.json`.
- * In containerized deployments (such as Google Cloud Run or AI Studio container runtimes),
- * local file storage is ephemeral across container instances or rebuilds.
- * For production multi-instance durability, an external database (such as Cloud SQL PostgreSQL
- * or Firestore) would be required.
+ * NOTE ON RUNTIME PERSISTENCE & ARCHITECTURAL REALITY:
+ * This store persists audit records to container-local JSON storage at `data/pakka_note_audit.json`.
+ * It is NOT a relational SQL database.
+ * In containerized deployments (such as Google Cloud Run or AI Studio preview container environments),
+ * local file storage is container-local and ephemeral across redeployments, restarts, or multi-instance scaling.
+ * For production multi-instance durability, the simplest supported persistent-storage options are:
+ * 1. Google Cloud SQL (PostgreSQL with Drizzle ORM)
+ * 2. Google Cloud Firestore (Document store with real-time sync)
+ *
+ * DURABILITY & OBSERVABILITY:
+ * - Mutations are queued serially and written atomically via temporary file rename.
+ * - Persistence failures (e.g. disk I/O, permissions, storage quota) are observable via `await auditDb.flush()`.
+ *   If persistence fails during confirmation, the operation rejects and rolls back memory state,
+ *   preventing false confirmation finalization.
  */
 
 import fs from 'node:fs';
@@ -29,14 +37,19 @@ interface DatabaseSchema {
   benchmark_runs: BenchmarkRun[];
 }
 
-const DB_DIR = path.resolve(process.cwd(), 'data');
-const DB_FILE = path.join(DB_DIR, 'pakka_note_audit.json');
+const DEFAULT_DB_DIR = path.resolve(process.cwd(), 'data');
+const DEFAULT_DB_FILE = path.join(DEFAULT_DB_DIR, 'pakka_note_audit.json');
 
-class AuditDatabase {
+export class AuditDatabase {
   private data: DatabaseSchema;
   private writeQueue: Promise<void> = Promise.resolve();
+  private storageDir: string;
+  private storageFile: string;
+  private simulateWriteFailure = false;
 
-  constructor() {
+  constructor(customFilePath?: string) {
+    this.storageFile = customFilePath || DEFAULT_DB_FILE;
+    this.storageDir = path.dirname(this.storageFile);
     this.data = {
       sessions: {},
       captures: [],
@@ -48,12 +61,12 @@ class AuditDatabase {
 
   private init() {
     try {
-      if (!fs.existsSync(DB_DIR)) {
-        fs.mkdirSync(DB_DIR, { recursive: true });
+      if (!fs.existsSync(this.storageDir)) {
+        fs.mkdirSync(this.storageDir, { recursive: true });
       }
 
-      if (fs.existsSync(DB_FILE)) {
-        const raw = fs.readFileSync(DB_FILE, 'utf-8');
+      if (fs.existsSync(this.storageFile)) {
+        const raw = fs.readFileSync(this.storageFile, 'utf-8');
         const parsed = JSON.parse(raw);
         this.data = {
           sessions: parsed.sessions || {},
@@ -71,42 +84,99 @@ class AuditDatabase {
   }
 
   /**
-   * Synchronous flush for initial setup
+   * Synchronous flush for initial boot
    */
   private flushSync() {
     try {
-      if (!fs.existsSync(DB_DIR)) {
-        fs.mkdirSync(DB_DIR, { recursive: true });
+      if (!fs.existsSync(this.storageDir)) {
+        fs.mkdirSync(this.storageDir, { recursive: true });
       }
-      const tmpFile = `${DB_FILE}.tmp.${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const tmpFile = `${this.storageFile}.tmp.${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       fs.writeFileSync(tmpFile, JSON.stringify(this.data, null, 2), 'utf-8');
-      fs.renameSync(tmpFile, DB_FILE);
+      fs.renameSync(tmpFile, this.storageFile);
     } catch (err) {
       console.error('[AuditDatabase] Failed to flush database synchronously:', err);
     }
   }
 
   /**
-   * Queued atomic flush to prevent concurrent write corruption
+   * Queued atomic flush with observable Promise resolution/rejection.
    */
-  private scheduleFlush(): void {
-    this.writeQueue = this.writeQueue
-      .then(async () => {
-        try {
-          if (!fs.existsSync(DB_DIR)) {
-            await fs.promises.mkdir(DB_DIR, { recursive: true });
-          }
-          const snapshot = JSON.stringify(this.data, null, 2);
-          const tmpFile = `${DB_FILE}.tmp.${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-          await fs.promises.writeFile(tmpFile, snapshot, 'utf-8');
-          await fs.promises.rename(tmpFile, DB_FILE);
-        } catch (err) {
-          console.error('[AuditDatabase] Error persisting data to JSON file:', err);
-        }
-      })
-      .catch((err) => {
-        console.error('[AuditDatabase] Critical write queue error:', err);
-      });
+  public scheduleFlush(): Promise<void> {
+    const nextFlush = this.writeQueue.then(async () => {
+      if (this.simulateWriteFailure) {
+        throw new Error('EIO: Simulated disk write persistence failure');
+      }
+
+      if (!fs.existsSync(this.storageDir)) {
+        await fs.promises.mkdir(this.storageDir, { recursive: true });
+      }
+
+      const snapshot = JSON.stringify(this.data, null, 2);
+      const tmpFile = `${this.storageFile}.tmp.${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      await fs.promises.writeFile(tmpFile, snapshot, 'utf-8');
+      await fs.promises.rename(tmpFile, this.storageFile);
+    });
+
+    // Keep writeQueue chain alive regardless of error so subsequent calls don't hang
+    this.writeQueue = nextFlush.catch((err) => {
+      // Handled by immediate caller awaiting flush()
+    });
+
+    // Propagate failure to the immediate caller that requested this flush
+    return nextFlush;
+  }
+
+  /**
+   * Explicitly await persistence of all pending operations to disk
+   */
+  public async flush(): Promise<void> {
+    return this.scheduleFlush();
+  }
+
+  /**
+   * Rollback memory mutations when disk persistence fails
+   */
+  public rollbackLastEvent(
+    sessionId: string,
+    previousStatus?: ConfirmationState,
+    previousFinalValue?: string
+  ): void {
+    this.data.state_events.pop();
+    const session = this.data.sessions[sessionId];
+    if (session) {
+      if (previousStatus) session.status = previousStatus;
+      session.finalValue = previousFinalValue;
+    }
+  }
+
+  /**
+   * Test hook: simulate persistence write failure
+   */
+  public setSimulateWriteFailure(fail: boolean): void {
+    this.simulateWriteFailure = fail;
+  }
+
+  /**
+   * Test hook: reset state for clean test isolation
+   */
+  public clearForTesting(): void {
+    this.data = {
+      sessions: {},
+      captures: [],
+      state_events: [],
+      benchmark_runs: [],
+    };
+    this.flushSync();
+  }
+
+  /**
+   * Test hook: point to a custom temporary file
+   */
+  public setTestStoragePath(customFilePath: string): void {
+    this.storageFile = customFilePath;
+    this.storageDir = path.dirname(customFilePath);
+    this.clearForTesting();
   }
 
   public createOrGetSession(
@@ -124,7 +194,7 @@ class AuditDatabase {
         capturesCount: 0,
         status: 'idle',
       };
-      this.scheduleFlush();
+      this.scheduleFlush().catch(() => {});
     }
     return this.data.sessions[sessionId];
   }
@@ -143,7 +213,7 @@ class AuditDatabase {
       if (finalValue !== undefined) {
         this.data.sessions[sessionId].finalValue = finalValue;
       }
-      this.scheduleFlush();
+      this.scheduleFlush().catch(() => {});
     }
   }
 
@@ -153,7 +223,7 @@ class AuditDatabase {
       this.data.sessions[capture.sessionId].capturesCount =
         (this.data.sessions[capture.sessionId].capturesCount || 0) + 1;
     }
-    this.scheduleFlush();
+    this.scheduleFlush().catch(() => {});
   }
 
   public getCapture(captureId: string): CaptureRecord | undefined {
@@ -172,7 +242,7 @@ class AuditDatabase {
     capture.normalizedCandidate = candidate;
     capture.validityStatus = valid ? 'valid_candidate' : 'invalid_candidate';
     capture.validationMessage = message;
-    this.scheduleFlush();
+    this.scheduleFlush().catch(() => {});
     return true;
   }
 
@@ -184,7 +254,7 @@ class AuditDatabase {
         this.data.sessions[event.sessionId].finalValue = event.finalValueIfConfirmed;
       }
     }
-    this.scheduleFlush();
+    this.scheduleFlush().catch(() => {});
   }
 
   public getEvents(sessionId: string): StateChangeEvent[] {
@@ -266,7 +336,7 @@ class AuditDatabase {
 
   public saveBenchmarkRun(run: BenchmarkRun): void {
     this.data.benchmark_runs.push(run);
-    this.scheduleFlush();
+    this.scheduleFlush().catch(() => {});
   }
 
   public getBenchmarkRuns(): BenchmarkRun[] {
@@ -281,9 +351,11 @@ class AuditDatabase {
 
   public getStats() {
     return {
-      engine: 'Local JSON Audit Store (Container-local, Non-relational)',
-      storagePath: 'data/pakka_note_audit.json',
+      engine: 'Local JSON Audit Store (Container-local, Non-relational File Store)',
+      storagePath: this.storageFile,
       runtimePersistenceDisclosed: true,
+      containerLocalLimitation:
+        'Local file storage is container-local and ephemeral across redeployments or container restarts. External persistent storage (Cloud SQL or Firestore) is required for multi-instance production durability.',
       totalSessions: Object.keys(this.data.sessions).length,
       totalCaptures: this.data.captures.length,
       totalEvents: this.data.state_events.length,
