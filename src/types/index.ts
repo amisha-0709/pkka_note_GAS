@@ -3,7 +3,19 @@
  * Voice-to-structured-data verification framework
  */
 
-export type FieldType = 'mobile_number' | 'pin' | 'service_tag' | 'spelled_name';
+export type FieldType =
+  | 'mobile_number'
+  | 'pin'
+  | 'service_tag'
+  | 'spelled_name'
+  | 'name'
+  | 'mobile'
+  | 'email'
+  | 'imei'
+  | 'serial'
+  | 'order_id'
+  | 'postal_pin'
+  | 'custom';
 
 export type LanguageCode = 'en-IN' | 'hi-IN';
 
@@ -17,6 +29,7 @@ export type ConfirmationState =
   | 'valid_candidate'
   | 'invalid_candidate'
   | 'uncertain'
+  | 'needs_review'
   | 'reading_back'
   | 'read_back'
   | 'confirmed'
@@ -49,7 +62,7 @@ export interface FieldValidationResult {
   rawTranscript: string;
   normalizedCandidate: string;
   valid: boolean;
-  status: 'valid_candidate' | 'invalid_candidate' | 'uncertain';
+  status: 'valid_candidate' | 'invalid_candidate' | 'uncertain' | 'needs_review';
   validationMessage: string;
   confidenceOrUncertainty?: string;
   normalizationSteps: NormalizationStep[];
@@ -110,7 +123,7 @@ export interface CaptureRecord {
   audioFormat: string;
   rawTranscript: string;
   normalizedCandidate: string;
-  validityStatus: 'valid_candidate' | 'invalid_candidate' | 'uncertain';
+  validityStatus: 'valid_candidate' | 'invalid_candidate' | 'uncertain' | 'needs_review';
   validationMessage: string;
   finalValue?: string;
   attempts: number;
@@ -144,11 +157,18 @@ export interface SystemHealth {
     ttsModel: string;
     ttsVoice: string;
   };
+  geminiConfig?: {
+    configured: boolean;
+    model: string;
+    lastLatencyMs?: number;
+  };
   persistence: {
     engine: string;
     totalSessions: number;
     totalCaptures: number;
     totalEvents: number;
+    totalCalls?: number;
+    totalCandidates?: number;
   };
 }
 
@@ -210,4 +230,151 @@ export interface BenchmarkRun {
   notes?: string;
   prerequisites?: string[];
 }
+
+// -------------------------------------------------------------
+// Yani Call Spectator Data Models (Section 8)
+// -------------------------------------------------------------
+
+export type Speaker = 'agent' | 'customer' | 'unknown';
+
+export type EntityType =
+  | 'name'
+  | 'mobile'
+  | 'email'
+  | 'imei'
+  | 'serial'
+  | 'order_id'
+  | 'postal_pin'
+  | 'custom';
+
+export type CandidateStatus =
+  | 'detected'
+  | 'needs_review'
+  | 'confirmed'
+  | 'edited'
+  | 'dismissed'
+  | 'superseded';
+
+export interface Call {
+  id: string;
+  startedAt: string;
+  endedAt?: string;
+  mode: 'live' | 'simulated' | 'upload';
+  state: 'idle' | 'listening' | 'paused' | 'ended' | 'reviewed';
+  language: 'en-IN' | 'hi-IN' | 'mixed';
+  consentShown: boolean;
+  templateId?: string;
+}
+
+export interface Segment {
+  id: string;
+  callId: string;
+  speaker: Speaker;
+  speakerInferred: boolean;
+  startMs: number;
+  endMs: number;
+  text: string;
+  verbatimText?: string;
+  final: boolean;
+  sttLatencyMs: number;
+}
+
+export interface CandidateValidation {
+  passed: boolean;
+  checks: string[];
+  warnings: string[];
+}
+
+export interface CandidateEvidence {
+  segmentId: string;
+  quote: string;
+  speaker: Speaker;
+  atMs: number;
+}
+
+export interface Candidate {
+  id: string;
+  callId: string;
+  type: EntityType;
+  value: string;
+  displayValue: string; // displayValue may be masked
+  status: CandidateStatus;
+  confidence: number; // 0..1
+  validation: CandidateValidation;
+  evidence: CandidateEvidence;
+  supersedes?: string;
+  customerVerbalConfirm?: boolean;
+  alternativeType?: EntityType;
+  createdAt: string;
+  resolvedAt?: string;
+  resolvedBy?: 'agent';
+}
+
+export interface CallNotesDetail {
+  candidateId: string;
+  label: string;
+  value: string;
+}
+
+export interface CallNotes {
+  callId: string;
+  version: number;
+  final: boolean;
+  summary: string;
+  issue: string;
+  details: CallNotesDetail[];
+  actions: string[];
+  followUps: string[];
+  openItems: string[];
+  generatedAt: string;
+  model: string;
+}
+
+export interface AuditEvent {
+  id: string;
+  callId: string;
+  type: string;
+  at: string;
+  meta: Record<string, unknown>;
+}
+
+export interface CallTemplate {
+  id: string;
+  name: string;
+  description: string;
+  requiredEntities: EntityType[];
+  orderIdPattern?: string;
+}
+
+export interface SensitiveDataMatch {
+  type: 'card_luhn' | 'aadhaar' | 'pan' | 'otp' | 'banking_pin';
+  label: string;
+  maskedSnippet: string;
+  rawStartIndex: number;
+  rawEndIndex: number;
+}
+
+export interface IYaniStorage {
+  createCall(call: Call): Promise<Call>;
+  getCall(id: string): Promise<Call | undefined>;
+  updateCall(id: string, updates: Partial<Call>): Promise<Call | undefined>;
+  listCalls(): Promise<Call[]>;
+  deleteCall(id: string): Promise<boolean>;
+  purgeAll(): Promise<void>;
+
+  addSegment(segment: Segment): Promise<Segment>;
+  getSegments(callId: string): Promise<Segment[]>;
+
+  addCandidate(candidate: Candidate): Promise<Candidate>;
+  updateCandidate(id: string, updates: Partial<Candidate>): Promise<Candidate | undefined>;
+  getCandidates(callId: string): Promise<Candidate[]>;
+  getCandidate(id: string): Promise<Candidate | undefined>;
+
+  saveNotes(notes: CallNotes): Promise<CallNotes>;
+  getNotes(callId: string): Promise<CallNotes | undefined>;
+
+  logEvent(event: AuditEvent): Promise<AuditEvent>;
+  getAuditEvents(callId: string): Promise<AuditEvent[]>;
+}
+
 

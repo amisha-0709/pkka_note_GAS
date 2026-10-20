@@ -13,6 +13,10 @@ import type {
   StateChangeEvent,
   BenchmarkRun,
   ReadBackResult,
+  Call,
+  Segment,
+  Candidate,
+  CallNotes,
 } from '../types/index.ts';
 
 async function safeFetchJson<T>(
@@ -290,3 +294,145 @@ export async function testConnection(): Promise<{
   }>('/api/test-connection', { method: 'POST' });
   return data;
 }
+
+// -------------------------------------------------------------
+// Yani Call Spectator API Client Functions
+// -------------------------------------------------------------
+
+export async function createCallSession(params: {
+  mode?: 'live' | 'simulated' | 'upload';
+  language?: 'en-IN' | 'hi-IN' | 'mixed';
+  templateId?: string;
+  consentShown?: boolean;
+}): Promise<Call> {
+  const { ok, data } = await safeFetchJson<{ success: boolean; call: Call }>('/api/calls', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!ok || !data.call) throw new Error('Failed to create call session');
+  return data.call;
+}
+
+export async function fetchAllCalls(): Promise<Call[]> {
+  const { ok, data } = await safeFetchJson<{ success: boolean; calls: Call[] }>('/api/calls');
+  if (!ok || !data.calls) return [];
+  return data.calls;
+}
+
+export async function fetchCallDetails(callId: string): Promise<{
+  call: Call;
+  segments: Segment[];
+  candidates: Candidate[];
+  notes?: CallNotes;
+}> {
+  const { ok, data } = await safeFetchJson<{
+    success: boolean;
+    call: Call;
+    segments: Segment[];
+    candidates: Candidate[];
+    notes?: CallNotes;
+  }>(`/api/calls/${encodeURIComponent(callId)}`);
+  if (!ok || !data.call) throw new Error(`Failed to load call ${callId}`);
+  return data;
+}
+
+export async function sendCallChunk(params: {
+  callId: string;
+  channel: 'agent' | 'customer';
+  seq: number;
+  startMs: number;
+  endMs?: number;
+  textTranscript?: string;
+  audioBlob?: Blob;
+}): Promise<void> {
+  const { callId, channel, seq, startMs, endMs, textTranscript, audioBlob } = params;
+
+  if (audioBlob) {
+    const formData = new FormData();
+    formData.append('audio', audioBlob, `chunk_${seq}.wav`);
+    formData.append('channel', channel);
+    formData.append('seq', String(seq));
+    formData.append('startMs', String(startMs));
+    if (endMs) formData.append('endMs', String(endMs));
+    if (textTranscript) formData.append('textTranscript', textTranscript);
+
+    await fetch(`/api/calls/${encodeURIComponent(callId)}/chunk`, {
+      method: 'POST',
+      body: formData,
+    });
+  } else {
+    await fetch(`/api/calls/${encodeURIComponent(callId)}/chunk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        channel,
+        seq,
+        startMs,
+        endMs,
+        textTranscript,
+      }),
+    });
+  }
+}
+
+export async function pauseCallSession(callId: string): Promise<void> {
+  await safeFetchJson(`/api/calls/${encodeURIComponent(callId)}/pause`, { method: 'POST' });
+}
+
+export async function resumeCallSession(callId: string): Promise<void> {
+  await safeFetchJson(`/api/calls/${encodeURIComponent(callId)}/resume`, { method: 'POST' });
+}
+
+export async function endCallSession(callId: string): Promise<{ call: Call; notes?: CallNotes }> {
+  const { ok, data } = await safeFetchJson<{ success: boolean; call: Call; notes?: CallNotes }>(
+    `/api/calls/${encodeURIComponent(callId)}/end`,
+    { method: 'POST' }
+  );
+  if (!ok || !data.call) throw new Error(`Failed to end call ${callId}`);
+  return data;
+}
+
+export async function sendCandidateAction(
+  callId: string,
+  candidateId: string,
+  action: 'confirm' | 'edit' | 'dismiss',
+  value?: string
+): Promise<Candidate> {
+  const { ok, data } = await safeFetchJson<{ success: boolean; candidate: Candidate }>(
+    `/api/calls/${encodeURIComponent(callId)}/candidates/${encodeURIComponent(candidateId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, value }),
+    }
+  );
+  if (!ok || !data.candidate) throw new Error(`Failed to apply ${action} on candidate`);
+  return data.candidate;
+}
+
+export async function regenerateCallNotes(callId: string): Promise<CallNotes> {
+  const { ok, data } = await safeFetchJson<{ success: boolean; notes: CallNotes }>(
+    `/api/calls/${encodeURIComponent(callId)}/notes/regenerate`,
+    { method: 'POST' }
+  );
+  if (!ok || !data.notes) throw new Error('Failed to regenerate call notes');
+  return data.notes;
+}
+
+export async function deleteCallSession(callId: string): Promise<void> {
+  const { ok } = await safeFetchJson(`/api/calls/${encodeURIComponent(callId)}`, {
+    method: 'DELETE',
+  });
+  if (!ok) throw new Error(`Failed to delete call ${callId}`);
+}
+
+export async function startSimulatedCall(scriptId: string): Promise<{ call: Call; script: any }> {
+  const { ok, data } = await safeFetchJson<{ success: boolean; call: Call; script: any }>(
+    `/api/simulate/${encodeURIComponent(scriptId)}`,
+    { method: 'POST' }
+  );
+  if (!ok || !data.call) throw new Error(`Failed to start simulation ${scriptId}`);
+  return data;
+}
+

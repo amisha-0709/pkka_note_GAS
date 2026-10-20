@@ -25,11 +25,17 @@ healthRouter.get('/api/health', (req, res) => {
       ttsModel: config.ttsModel,
       ttsVoice: config.ttsVoice,
     },
+    geminiConfig: {
+      configured: Boolean(process.env.GEMINI_API_KEY),
+      model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+    },
     persistence: {
       engine: stats.engine,
       totalSessions: stats.totalSessions,
       totalCaptures: stats.totalCaptures,
       totalEvents: stats.totalEvents,
+      totalCalls: stats.totalCalls,
+      totalCandidates: stats.totalCandidates,
     },
   };
 

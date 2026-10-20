@@ -1,6 +1,6 @@
 {
-  "name": "Pakka Note",
-  "description": "Voice-to-structured-data verification: capture, validate, read back, and confirm spoken identifiers with Gnani AI.",
+  "name": "Pakka Note: Yani Call Spectator",
+  "description": "Silent call spectator for support agents: real-time two-speaker listening, candidate extraction with evidence, and live call notes.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

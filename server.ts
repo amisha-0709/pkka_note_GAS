@@ -11,8 +11,8 @@ import { readbackRouter } from './src/server/routes/readback.ts';
 import { confirmationRouter } from './src/server/routes/confirmation.ts';
 import { correctionRouter } from './src/server/routes/correction.ts';
 import { recordsRouter } from './src/server/routes/records.ts';
-import { benchmarkRouter } from './src/server/routes/benchmark.ts';
 import { testConnectionRouter } from './src/server/routes/testConnection.ts';
+import { callsRouter } from './src/server/routes/calls.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,6 +28,12 @@ async function startServer() {
 
   // Mount API routers
   app.use(healthRouter);
+  app.use('/api/calls', callsRouter);
+  app.use('/api/simulate', (req, res, next) => {
+    // Forward /api/simulate/:scriptId to /api/calls/simulate/:scriptId
+    req.url = `/simulate${req.url}`;
+    callsRouter(req, res, next);
+  });
   app.use(captureRouter);
   app.use(readbackRouter);
   app.use(confirmationRouter);

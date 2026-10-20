@@ -1,70 +1,105 @@
 import React from 'react';
 import type { SystemHealth } from '../types/index.ts';
 
+export type ActiveNavTab = 'home' | 'live_call' | 'post_review' | 'evaluation' | 'settings';
+
 interface AppHeaderProps {
-  activeTab: 'capture' | 'history' | 'benchmark' | 'settings';
-  setActiveTab: (tab: 'capture' | 'history' | 'benchmark' | 'settings') => void;
+  activeTab: ActiveNavTab;
+  setActiveTab: (tab: ActiveNavTab) => void;
   health: SystemHealth | null;
+  callMode?: 'live' | 'simulated' | 'upload';
+  isCallActive?: boolean;
 }
 
 export const AppHeader: React.FC<AppHeaderProps> = ({
   activeTab,
   setActiveTab,
   health,
+  callMode = 'simulated',
+  isCallActive = false,
 }) => {
-  const isGnaniReady = health?.gnaniConfig.sttConfigured && health?.gnaniConfig.ttsConfigured;
+  const isPrismaReady = health?.gnaniConfig.sttConfigured;
+  const isGeminiReady = health?.geminiConfig?.configured;
 
   return (
-    <header className="bg-slate-900 border-b border-slate-800 text-white">
+    <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between gap-8 h-16">
-          {/* Zone 1: Brand Wordmark */}
+        <div className="flex items-center justify-between gap-4 h-16">
+          {/* Brand Wordmark & Mode Badge */}
           <div className="flex items-center gap-3 shrink-0">
             <button
-              onClick={() => setActiveTab('capture')}
-              className="text-left group cursor-pointer focus-visible:outline-none"
+              onClick={() => setActiveTab('home')}
+              className="text-left group cursor-pointer focus-visible:outline-none flex items-center gap-2"
             >
-              <span className="text-xl font-bold tracking-tight text-white group-hover:text-indigo-300 transition-colors whitespace-nowrap">
-                Pakka Note
-              </span>
+              <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white shadow-sm">
+                Y
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-lg font-bold tracking-tight text-white group-hover:text-indigo-300 transition-colors">
+                    Pakka Note: Yani
+                  </span>
+                  <span className="text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800">
+                    Call Spectator
+                  </span>
+                </div>
+              </div>
             </button>
-            <span className="hidden lg:inline text-xs text-slate-400 border-l border-slate-700 pl-3">
-              Voice-to-structured-data verification
-            </span>
+
+            {/* Persistent Spectator Rule Indicator (Section 11) */}
+            <div className="hidden xl:flex items-center gap-2 text-xs font-medium text-emerald-400 bg-emerald-950/70 border border-emerald-800/80 px-3 py-1 rounded-full">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Yani is listening. It does not speak on this call.</span>
+            </div>
           </div>
 
-          {/* Zone 2: 4 Clean Navigation Links */}
-          <nav aria-label="Main Navigation" className="flex items-center gap-1 sm:gap-4 overflow-x-auto">
+          {/* Navigation Tabs */}
+          <nav aria-label="Main Navigation" className="flex items-center gap-1 sm:gap-2 overflow-x-auto py-1">
             <button
-              onClick={() => setActiveTab('capture')}
+              onClick={() => setActiveTab('home')}
               className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                activeTab === 'capture'
+                activeTab === 'home'
                   ? 'bg-indigo-600 text-white'
                   : 'text-slate-300 hover:text-white hover:bg-slate-800'
               }`}
             >
-              Capture
+              Calls
             </button>
+
             <button
-              onClick={() => setActiveTab('history')}
-              className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                activeTab === 'history'
+              onClick={() => setActiveTab('live_call')}
+              className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 ${
+                activeTab === 'live_call'
                   ? 'bg-indigo-600 text-white'
                   : 'text-slate-300 hover:text-white hover:bg-slate-800'
               }`}
             >
-              Session History
+              {isCallActive && <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />}
+              <span>Live Call Workspace</span>
             </button>
+
             <button
-              onClick={() => setActiveTab('benchmark')}
+              onClick={() => setActiveTab('post_review')}
               className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                activeTab === 'benchmark'
+                activeTab === 'post_review'
                   ? 'bg-indigo-600 text-white'
                   : 'text-slate-300 hover:text-white hover:bg-slate-800'
               }`}
             >
-              Benchmark
+              Post-Call Review
             </button>
+
+            <button
+              onClick={() => setActiveTab('evaluation')}
+              className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                activeTab === 'evaluation'
+                  ? 'bg-indigo-600 text-white'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800'
+              }`}
+            >
+              Evaluation
+            </button>
+
             <button
               onClick={() => setActiveTab('settings')}
               className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
@@ -73,23 +108,37 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
                   : 'text-slate-300 hover:text-white hover:bg-slate-800'
               }`}
             >
-              Settings & Status
+              Settings
             </button>
           </nav>
 
-          {/* Zone 3: 1 Primary Status Indicator */}
+          {/* Status Dots & Mode Badge */}
           <div className="flex items-center gap-3 shrink-0">
-            <button
-              onClick={() => setActiveTab('settings')}
-              title="Click to view Gnani integration status"
-              className={`px-3 py-1 text-xs font-medium rounded border transition-colors whitespace-nowrap shrink-0 ${
-                isGnaniReady
-                  ? 'bg-emerald-950/80 text-emerald-300 border-emerald-800'
-                  : 'bg-amber-950/80 text-amber-300 border-amber-800'
+            {/* Mode badge: Live, Simulated, Offline */}
+            <span
+              className={`px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider rounded border ${
+                callMode === 'simulated'
+                  ? 'bg-amber-950/70 text-amber-300 border-amber-800'
+                  : callMode === 'live'
+                  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800'
+                  : 'bg-slate-800 text-slate-300 border-slate-700'
               }`}
             >
-              {isGnaniReady ? 'Gnani Connected' : 'Config Required'}
-            </button>
+              {callMode === 'simulated' ? 'Simulated' : callMode === 'live' ? 'Live' : 'Upload'}
+            </span>
+
+            {/* Health status dots */}
+            <div className="hidden sm:flex items-center gap-3 text-xs text-slate-400 bg-slate-800/80 px-2.5 py-1 rounded border border-slate-700/60">
+              <span className="flex items-center gap-1.5" title={isPrismaReady ? 'Prisma Connected' : 'Prisma Offline'}>
+                <span className={`w-2 h-2 rounded-full ${isPrismaReady ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                Prisma
+              </span>
+              <span className="text-slate-600">|</span>
+              <span className="flex items-center gap-1.5" title={isGeminiReady ? 'Gemini 3.8 Flash Ready' : 'Gemini Fallback'}>
+                <span className={`w-2 h-2 rounded-full ${isGeminiReady ? 'bg-emerald-400' : 'bg-sky-400'}`} />
+                Gemini
+              </span>
+            </div>
           </div>
         </div>
       </div>
